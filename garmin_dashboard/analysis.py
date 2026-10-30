@@ -106,9 +106,13 @@ def activity_load(acts: pd.DataFrame, daily: pd.DataFrame, profile: dict) -> tup
     """Belastung pro Einheit: Garmin-Trainingslast (EPOC), Lücken per TRIMP."""
     if acts.empty:
         return pd.Series(dtype=float), "keine Aktivitäten"
-    rest = profile.get("rest_hr")
-    if not rest or not math.isfinite(rest):
-        rest = float(daily["rhr"].median()) if "rhr" in daily and daily["rhr"].notna().any() else 55.0
+    # Gemessener Ruhepuls vor dem Wert aus den Zonen-Einstellungen (der ist oft veraltet)
+    if "rhr" in daily and daily["rhr"].notna().sum() >= 7:
+        rest = float(daily["rhr"].median())
+    else:
+        rest = profile.get("rest_hr")
+        if not rest or not math.isfinite(rest):
+            rest = 55.0
     hrmax = profile.get("max_hr")
     if not hrmax or not math.isfinite(hrmax):
         observed = acts["max_hr"].quantile(0.98) if acts["max_hr"].notna().any() else np.nan
@@ -688,7 +692,7 @@ def _records(df: pd.DataFrame, cols: dict[str, int]) -> dict[str, list]:
     return {c: [_f(v, nd) for v in df[c]] if c in df else [None] * len(df) for c, nd in cols.items()}
 
 
-def analyze(data: dict[str, Any], sleep_need_h: float = 8.0) -> dict[str, Any]:
+def analyze(data: dict[str, Any], sleep_need_h: float | None = None) -> dict[str, Any]:
     daily: pd.DataFrame = data["daily"]
     acts: pd.DataFrame = data["activities"]
     prof = data["profile"]
@@ -715,6 +719,10 @@ def analyze(data: dict[str, Any], sleep_need_h: float = 8.0) -> dict[str, Any]:
     h = hrv_model(daily.get("hrv", pd.Series(np.nan, index=idx)))
     r = rhr_model(daily.get("rhr", pd.Series(np.nan, index=idx)))
     rec = recovery_index(h["z"], r["z"], daily.get("sleep_score", pd.Series(np.nan, index=idx)))
+    if sleep_need_h is None:
+        # Garmins persönlicher Schlafbedarf (berücksichtigt u. a. Alter), sonst 8 h
+        garmin_need = daily.get("sleep_need_h", pd.Series(dtype=float)).dropna().iloc[-28:]
+        sleep_need_h = round(float(garmin_need.median()), 2) if len(garmin_need) >= 3 else 8.0
     sleep = sleep_model(daily, sleep_need_h)
     since28 = idx[-1] - pd.Timedelta(days=27)
     dist = intensity_distribution(acts, since28)

@@ -12,6 +12,25 @@ python -m garmin_dashboard demo --open
 python -m garmin_dashboard update --days 180 --open
 ```
 
+### Offizielle Garmin Personal API (empfohlen)
+
+Ist die Umgebungsvariable `GARMIN_PERSONAL_API_KEY` gesetzt, nutzt `fetch`/`update` automatisch die offizielle [Garmin Connect Personal API](https://github.com/garmin/connect-personal-api-python) (`pip install garmin-connect-personal-api-python`) statt des Logins. Der Key wird nur gegen ein Bearer-Token getauscht, das unter `~/.config/garmin/` zwischengespeichert wird.
+
+| Ablage | Personal-API-Endpunkt |
+|---|---|
+| `daily/summary` | `/usersummary-service/usersummary/daily?calendarDate=` |
+| `daily/sleep` | `/sleep-service/sleep/dailySleep?date=` |
+| `daily/hrv` | `/hrv-service/hrv/<datum>` |
+| `daily/spo2` | `/wellness-service/wellness/daily/spo2acclimation/<datum>` |
+| `range/activities` | `/activitylist-service/activities/search/activities` (100er-Seiten) |
+| `range/weigh_ins` | `/weight-service/weight/range/<start>/<ende>?includeAll=true` |
+| `range/body_battery` | `/wellness-service/wellness/bodyBattery/reports/daily` (30-Tage-Blöcke; Body Battery fehlt in der Tageszusammenfassung) |
+| `static/heart_rate_zones`, `static/fitness_age`, `static/profile` | `/biometric-service/heartRateZones/v2`, `/fitnessage-service/fitnessage/v2/<heute>`, `/userprofile-service/userprofile/settings` |
+
+Endpunkte ohne Gegenstück (Training Readiness, Trainingsstatus/VO2max, Wettkampfprognosen, Rekorde, …) werden übersprungen und in `data/raw/meta.json` unter `skipped_endpoints` protokolliert. Fehlerverhalten: 4xx für einzelne Tage → weiter; 401 → Token einmal erneuern; 429 → Abbruch (bereits geladene Tage bleiben im Cache, ein erneuter Lauf macht dort weiter). Tageswerte werden neueste zuerst geladen.
+
+### Login-Modus (inoffiziell)
+
 Beim ersten Login fragt das Tool nach E-Mail, Passwort und ggf. MFA-Code. Alternativ setzt du die Umgebungsvariablen `GARMIN_EMAIL` und `GARMIN_PASSWORD`. Die Tokens landen in `~/.garminconnect`, danach ist kein Passwort mehr nötig. Weitere Läufe laden nur noch neue Tage, weil ältere Tageswerte zwischengespeichert werden.
 
 | Befehl | Zweck |
@@ -20,7 +39,7 @@ Beim ersten Login fragt das Tool nach E-Mail, Passwort und ggf. MFA-Code. Altern
 | `build` | Dashboard aus vorhandenen Daten neu erzeugen → `output/dashboard.html` |
 | `update` | `fetch` + `build` |
 | `demo` | Demodaten erzeugen + Dashboard bauen |
-| `--sleep-need 8.5` | persönlicher Schlafbedarf für die Schlafschuld-Berechnung |
+| `--sleep-need 8.5` | Schlafbedarf für die Schlafschuld (Standard: Garmins persönlicher Wert, sonst 8 h) |
 
 > Garmin bietet Privatpersonen keine offizielle API an. Genutzt wird die inoffizielle Bibliothek [`garminconnect`](https://github.com/cyberjunky/python-garminconnect). Endpunkte können sich ändern, und einzelne Fehler werden in `data/raw/meta.json` protokolliert, ohne den Lauf abzubrechen.
 

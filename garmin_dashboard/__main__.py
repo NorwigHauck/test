@@ -10,7 +10,7 @@ from pathlib import Path
 from . import analysis, normalize, report
 
 
-def build(data_dir: Path, out: Path, sleep_need: float) -> Path:
+def build(data_dir: Path, out: Path, sleep_need: float | None) -> Path:
     data = normalize.load(data_dir)
     result = analysis.analyze(data, sleep_need_h=sleep_need)
     report.write(result, out)
@@ -21,7 +21,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="garmin_dashboard", description="Health- & Trainings-Dashboard aus Garmin-Connect-Daten")
     ap.add_argument("--data", type=Path, default=Path("data"), help="Ordner für Rohdaten (Standard: data)")
     ap.add_argument("--out", type=Path, default=Path("output/dashboard.html"), help="Ziel-HTML")
-    ap.add_argument("--sleep-need", type=float, default=8.0, help="persönlicher Schlafbedarf in Stunden")
+    ap.add_argument("--sleep-need", type=float, default=None, help="Schlafbedarf in Stunden (Standard: Garmins persönlicher Wert, sonst 8)")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
 

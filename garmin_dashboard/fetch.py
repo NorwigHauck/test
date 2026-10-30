@@ -212,7 +212,197 @@ class Fetcher:
         log.info("Aktivitätsdetails: %d Aktivitäten geprüft", len(todo))
 
 
+# --------------------------------------------------------------------------- #
+# Offizielle Garmin Personal API (API-Key statt Login)
+
+PERSONAL_API_KEY_ENV = "GARMIN_PERSONAL_API_KEY"
+PERSONAL_PAUSE_S = 0.7  # bei 0,35 s griff nach ~120 Aufrufen das Rate-Limit
+
+# Tages-Endpunkte: Ablagename -> (Pfad, Query-Parameter) für ein Datum
+PERSONAL_DAILY: dict[str, Callable[[str], tuple[str, dict | None]]] = {
+    "summary": lambda d: ("/usersummary-service/usersummary/daily", {"calendarDate": d}),
+    "sleep": lambda d: ("/sleep-service/sleep/dailySleep", {"date": d}),
+    "hrv": lambda d: (f"/hrv-service/hrv/{d}", None),
+    "spo2": lambda d: (f"/wellness-service/wellness/daily/spo2acclimation/{d}", None),
+}
+
+PERSONAL_STATIC: dict[str, Callable[[str], tuple[str, dict | None]]] = {
+    "heart_rate_zones": lambda today: ("/biometric-service/heartRateZones/v2", None),
+    "fitness_age": lambda today: (f"/fitnessage-service/fitnessage/v2/{today}", None),
+    "profile": lambda today: ("/userprofile-service/userprofile/settings", None),
+}
+
+# Body Battery steckt in der Personal API nicht in der Tageszusammenfassung,
+# sondern in einem eigenen Zeitraum-Endpunkt (max. 30 Tage je Abruf).
+BODY_BATTERY_PATH = "/wellness-service/wellness/bodyBattery/reports/daily"
+ACTIVITY_SEARCH_PATH = "/activitylist-service/activities/search/activities"
+
+
+class PersonalApiAbort(RuntimeError):
+    """Abbruch des Abrufs (Rate-Limit oder Authentifizierung dauerhaft abgelehnt)."""
+
+
+class PersonalApiFetcher:
+    """Lädt Daten über die offizielle Personal API in dieselbe Ablage wie ``Fetcher``.
+
+    Fehlerbehandlung: 4xx bei einzelnen Abrufen wird protokolliert und
+    übersprungen, bei 401 wird das Token einmal erneuert, bei 429 wird
+    abgebrochen.
+    """
+
+    def __init__(self, api_key: str, data_dir: Path):
+        from garmin_personal_api import GarminPersonalApiClient, PersonalApiAuthenticator
+
+        self._api_key = api_key
+        self.auth = PersonalApiAuthenticator()
+        self.client = GarminPersonalApiClient(self.auth.obtain_token(api_key).access_token)
+        self.raw = Path(data_dir) / "raw"
+        self.errors: list[str] = []
+        self.skipped: list[str] = []
+        self.calls = 0
+        self._refreshed = False
+
+    def _get(self, label: str, path: str, params: dict | None = None) -> Any:
+        from garmin_personal_api import HttpError
+
+        while True:
+            try:
+                self.calls += 1
+                result = self.client.get(path, params=params)
+                time.sleep(PERSONAL_PAUSE_S)
+                return result
+            except HttpError as exc:
+                if exc.status_code == 429:
+                    raise PersonalApiAbort(f"Rate-Limit (HTTP 429) bei {label}") from None
+                if exc.status_code == 401:
+                    if self._refreshed:
+                        raise PersonalApiAbort(f"Token abgelehnt (HTTP 401) bei {label}") from None
+                    log.info("HTTP 401 – erneuere Token einmalig")
+                    self._refreshed = True
+                    token = self.auth.obtain_token(self._api_key, force_refresh=True)
+                    self.client.update_bearer_token(token.access_token)
+                    continue
+                self.errors.append(f"{label}: HTTP {exc.status_code}")
+                return None
+            except Exception as exc:  # Netzwerkfehler o. Ä.: diesen Abruf überspringen
+                self.errors.append(f"{label}: {type(exc).__name__}")
+                return None
+
+    def fetch_daily(self, start: dt.date, end: dt.date) -> None:
+        today = dt.date.today()
+        # Neueste Tage zuerst: greift das Rate-Limit, sind die aktuellen Werte schon da.
+        days = [end - dt.timedelta(days=i) for i in range((end - start).days + 1)]
+        for i, day in enumerate(days, 1):
+            ds = day.isoformat()
+            fresh = (today - day).days < REFRESH_DAYS
+            for name, spec in PERSONAL_DAILY.items():
+                path = self.raw / "daily" / name / f"{ds}.json"
+                if path.exists() and not fresh:
+                    continue
+                data = self._get(f"{name} {ds}", *spec(ds))
+                if data:
+                    Fetcher._save(path, data)
+            if i % 10 == 0 or i == len(days):
+                log.info("Tageswerte: %d/%d Tage", i, len(days))
+
+    def fetch_ranges(self, start: dt.date, end: dt.date) -> None:
+        acts: list[Any] = []
+        offset = 0
+        while True:
+            page = self._get(
+                f"activities ab {offset}",
+                ACTIVITY_SEARCH_PATH,
+                {"startDate": start.isoformat(), "endDate": end.isoformat(), "start": offset, "limit": 100},
+            )
+            if not isinstance(page, list) or not page:
+                break
+            acts.extend(page)
+            if len(page) < 100:
+                break
+            offset += 100
+        Fetcher._save(self.raw / "range" / "activities.json", [acts])
+        log.info("Aktivitäten: %d", len(acts))
+
+        weights = self._get(
+            "weigh_ins",
+            f"/weight-service/weight/range/{start.isoformat()}/{end.isoformat()}",
+            {"includeAll": "true"},
+        )
+        if weights is not None:
+            Fetcher._save(self.raw / "range" / "weigh_ins.json", [weights])
+
+        bb: list[Any] = []
+        s = start
+        while s <= end:
+            e = min(end, s + dt.timedelta(days=29))
+            chunk = self._get(
+                f"body_battery {s}..{e}",
+                BODY_BATTERY_PATH,
+                {"startDate": s.isoformat(), "endDate": e.isoformat(), "chunks": 96},
+            )
+            if isinstance(chunk, list):
+                bb.extend(chunk)
+            s = e + dt.timedelta(days=1)
+        Fetcher._save(self.raw / "range" / "body_battery.json", [bb])
+        log.info("Body Battery: %d Tage", len(bb))
+
+    def fetch_static(self) -> None:
+        today = dt.date.today().isoformat()
+        for name, spec in PERSONAL_STATIC.items():
+            data = self._get(name, *spec(today))
+            if data is not None:
+                Fetcher._save(self.raw / "static" / f"{name}.json", data)
+
+
+def _personal_skipped() -> list[str]:
+    """Endpunkte des Login-Modus ohne Gegenstück in der Personal API."""
+    mapped_daily = set(PERSONAL_DAILY)
+    mapped_static = set(PERSONAL_STATIC)
+    mapped_range = {"activities", "weigh_ins"}
+    return (
+        [f"daily/{n}" for n in DAILY_ENDPOINTS if n not in mapped_daily]
+        + [f"range/{n}" for n in RANGE_ENDPOINTS if n not in mapped_range]
+        + [f"static/{n}" for n in STATIC_ENDPOINTS if n not in mapped_static]
+        + ["activity_details"]
+    )
+
+
+def fetch_personal(data_dir: Path, days: int, api_key: str) -> None:
+    end = dt.date.today()
+    start = end - dt.timedelta(days=days - 1)
+    logging.getLogger("garmin_personal_api").setLevel(logging.WARNING)  # nicht jeden GET loggen
+    f = PersonalApiFetcher(api_key, data_dir)
+    log.info("Garmin Personal API: lade %s bis %s", start, end)
+    aborted = None
+    try:
+        f.fetch_static()
+        f.fetch_ranges(start, end)
+        f.fetch_daily(start, end)
+    except PersonalApiAbort as exc:
+        aborted = str(exc)
+        log.error("Abruf abgebrochen: %s", exc)
+    meta = {
+        "source": "garmin-personal-api",
+        "fetched_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "api_calls": f.calls,
+        "aborted": aborted,
+        "skipped_endpoints": _personal_skipped(),
+        "errors": f.errors[-200:],
+    }
+    Fetcher._save(Path(data_dir) / "raw" / "meta.json", meta)
+    log.info("Fertig: %d API-Aufrufe, %d Fehler, %d Endpunkte ohne Gegenstück übersprungen",
+             f.calls, len(f.errors), len(meta["skipped_endpoints"]))
+    if aborted:
+        raise SystemExit(f"Abbruch: {aborted}")
+
+
 def fetch_all(data_dir: Path, days: int, tokenstore: str, details: int = 40) -> None:
+    api_key = os.getenv(PERSONAL_API_KEY_ENV, "").strip()
+    if api_key:
+        fetch_personal(data_dir, days, api_key)
+        return
     garmin = login(tokenstore)
     end = dt.date.today()
     start = end - dt.timedelta(days=days - 1)

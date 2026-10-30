@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -179,8 +180,10 @@ def _daily_rows(raw: Path) -> dict[str, dict[str, Any]]:
             resp_waking=num(s.get("avgWakingRespirationValue")),
         )
 
+    sleep_end_gmt: dict[str, float] = {}
     for d, s in _daily_files(raw, "sleep"):
-        dto = pick(s, "dailySleepDTO") or {}
+        # garminconnect liefert {"dailySleepDTO": {...}}, die Personal API das DTO direkt
+        dto = pick(s, "dailySleepDTO") or (s if isinstance(s, dict) and "sleepTimeSeconds" in s else {})
         total = num(dto.get("sleepTimeSeconds"))
         if np.isnan(total) or total <= 0:
             continue
@@ -205,7 +208,9 @@ def _daily_rows(raw: Path) -> dict[str, dict[str, Any]]:
             sleep_hrv=num(pick(s, "avgOvernightHrv")),
             sleep_bb_change=num(pick(s, "bodyBatteryChange")),
             restless=num(pick(s, "restlessMomentsCount")),
+            sleep_need_h=num(pick(s, "sleepNeed.actual", "dailySleepDTO.sleepNeed.actual")) / 60,
         )
+        sleep_end_gmt[d] = num(dto.get("sleepEndTimestampGMT"))
 
     for d, h in _daily_files(raw, "hrv"):
         summ = pick(h, "hrvSummary") or {}
@@ -279,7 +284,46 @@ def _daily_rows(raw: Path) -> dict[str, dict[str, Any]]:
         if isinstance(x, dict) and x.get("valueInML"):
             row(d)["water_l"] = num(x.get("valueInML")) / 1000
 
+    _body_battery(raw, row, sleep_end_gmt)
     return rows
+
+
+def _body_battery(raw: Path, row: Any, sleep_end_gmt: dict[str, float]) -> None:
+    """Body Battery aus dem Personal-API-Bericht (Zeitreihe je Tag).
+
+    Füllt nur Felder, die die Tageszusammenfassung nicht schon geliefert hat.
+    """
+    for chunk in _range(raw, "body_battery"):
+        for day in chunk if isinstance(chunk, list) else []:
+            d = day.get("date") if isinstance(day, dict) else None
+            if not d:
+                continue
+            desc = {x.get("bodyBatteryValueDescriptorKey"): x.get("bodyBatteryValueDescriptorIndex") for x in day.get("bodyBatteryValueDescriptorDTOList") or []}
+            ti, vi = desc.get("timestamp", 0), desc.get("bodyBatteryLevel", 1)
+            pts = [
+                (num(v[ti]), num(v[vi]))
+                for v in day.get("bodyBatteryValuesArray") or []
+                if isinstance(v, list) and len(v) > max(ti, vi)
+            ]
+            pts = [(t, v) for t, v in pts if not (np.isnan(t) or np.isnan(v))]
+            if not pts:
+                continue
+            values = [v for _, v in pts]
+            wake = np.nan
+            end = sleep_end_gmt.get(d, np.nan)
+            if not np.isnan(end):
+                after = [v for t, v in pts if t >= end]
+                wake = after[0] if after else np.nan
+            r = row(d)
+            for key, val in (
+                ("bb_high", max(values)),
+                ("bb_low", min(values)),
+                ("bb_charged", num(day.get("charged"))),
+                ("bb_drained", num(day.get("drained"))),
+                ("bb_wake", wake),
+            ):
+                if np.isnan(num(r.get(key))):
+                    r[key] = val
 
 
 def _body(raw: Path) -> pd.DataFrame:
@@ -299,6 +343,24 @@ def _body(raw: Path) -> pd.DataFrame:
                     "bmi": num(w.get("bmi")),
                 }
             )
+    # Personal API: weight/range -> dailyWeightSummaries[].allWeightMetrics / latestWeight
+    for chunk in _range(raw, "weigh_ins"):
+        for summ in pick(chunk, "dailyWeightSummaries", default=[]) or []:
+            metrics = summ.get("allWeightMetrics") or ([summ["latestWeight"]] if summ.get("latestWeight") else [])
+            for w in metrics:
+                weight = num(w.get("weight"))
+                if np.isnan(weight):
+                    continue
+                recs.append(
+                    {
+                        "date": w.get("calendarDate") or summ.get("summaryDate"),
+                        "weight_kg": weight / 1000 if weight > 1000 else weight,
+                        "body_fat": num(w.get("bodyFat")),
+                        "muscle_kg": num(w.get("muscleMass")) / 1000,
+                        "body_water": num(w.get("bodyWater")),
+                        "bmi": num(w.get("bmi")),
+                    }
+                )
     df = pd.DataFrame(recs)
     if df.empty:
         return df
@@ -428,7 +490,7 @@ def _profile(st: dict[str, Any]) -> dict[str, Any]:
         except ValueError:
             pass
     return {
-        "name": pick(st, "full_name.fullName", "profile.displayName") or pick(prof, "fullName") or "Athlet:in",
+        "name": pick(st, "full_name.fullName") or pick(prof, "fullName") or _readable_name(prof.get("displayName")) or "Athlet:in",
         "age": num(age if not np.isnan(age) else fa.get("chronologicalAge")),
         "gender": pick(info, "userInfo.genderType"),
         "height_cm": num(bio.get("height")),
@@ -454,6 +516,13 @@ def _profile(st: dict[str, Any]) -> dict[str, Any]:
             if isinstance(d, dict) and (d.get("productDisplayName") or d.get("displayName"))
         ],
     }
+
+
+def _readable_name(name: Any) -> str | None:
+    """displayName ist bei der Personal API eine UUID – die zeigen wir nicht an."""
+    if not isinstance(name, str) or re.fullmatch(r"[0-9a-f]{8}-[0-9a-f-]{27}", name.lower()):
+        return None
+    return name
 
 
 def _personal_records(st: dict[str, Any]) -> list[dict[str, Any]]:
