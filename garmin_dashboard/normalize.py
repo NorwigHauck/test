@@ -88,6 +88,11 @@ def num(x: Any) -> float:
         return np.nan
 
 
+def _nonneg(x: Any) -> float:
+    v = num(x)
+    return v if v >= 0 else np.nan
+
+
 def _read(path: Path) -> Any:
     try:
         return json.loads(path.read_text())
@@ -163,8 +168,9 @@ def _daily_rows(raw: Path) -> dict[str, dict[str, Any]]:
             rhr=num(s.get("restingHeartRate")),
             hr_min=num(s.get("minHeartRate")),
             hr_max=num(s.get("maxHeartRate")),
-            stress_avg=num(s.get("averageStressLevel")),
-            stress_max=num(s.get("maxStressLevel")),
+            # Garmin meldet -1/-2 für "zu wenig Daten"
+            stress_avg=_nonneg(s.get("averageStressLevel")),
+            stress_max=_nonneg(s.get("maxStressLevel")),
             stress_high_min=num(s.get("highStressDuration")) / 60,
             stress_rest_min=num(s.get("restStressDuration")) / 60,
             bb_high=num(s.get("bodyBatteryHighestValue")),
@@ -190,8 +196,8 @@ def _daily_rows(raw: Path) -> dict[str, dict[str, Any]]:
         r = row(d)
         start = _local_clock(dto.get("sleepStartTimestampLocal"))
         end = _local_clock(dto.get("sleepEndTimestampLocal"))
-        # Einschlafzeit auf eine durchgehende Skala bringen (18 Uhr .. 42 Uhr)
-        if not np.isnan(start) and start < 18:
+        # Einschlafzeit auf eine durchgehende Skala bringen (12 Uhr .. 36 Uhr)
+        if not np.isnan(start) and start < 12:
             start += 24
         r.update(
             sleep_h=total / 3600,

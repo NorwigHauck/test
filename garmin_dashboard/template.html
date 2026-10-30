@@ -568,7 +568,8 @@ function timeChart(host, spec) {
   if (!n || !hasData) { host.append(el("div", { class: "empty" }, "Keine Daten im gewählten Zeitraum")); return; }
 
   // Legende (ab 2 Serien)
-  const legendItems = series.filter(s => s.label && !s.noLegend);
+  const hasValues = s => [s.values, s.hi].some(a => (a || []).some(v => v !== null && v !== undefined));
+  const legendItems = series.filter(s => s.label && !s.noLegend && hasValues(s));
   if (legendItems.length >= 2) {
     const lg = el("div", { class: "legend" });
     for (const s of legendItems) {
@@ -935,17 +936,18 @@ function renderStatic() {
     { l: "HRV letzte Nacht", v: nf(K.hrv), u: "ms", d: "7-Tage-Ø " + nf(K.hrv7) + " · Normal " + nf(K.hrv_lo) + "–" + nf(K.hrv_hi), sp: "hrv" },
     { l: "Ruhepuls", v: nf(K.rhr), u: "S/min", d: deltaSpan(K.rhr !== null && K.rhr_base !== null ? K.rhr - K.rhr_base : null, 0, false, " zum 30-Tage-Ø"), sp: "rhr" },
     { l: "Schlaf", v: K.sleep_h === null ? "–" : fmtDur(K.sleep_h).replace(" h", ""), u: "h", d: "Schlafscore " + nf(K.sleep_score), sp: "sleep_h" },
-    { l: "Body Battery morgens", v: nf(K.bb_wake), u: "", d: "Garmin Readiness " + nf(K.readiness), sp: "bb_wake" },
+    { l: "Body Battery morgens", v: nf(K.bb_wake), u: "", d: K.readiness === null ? "Stress Ø " + nf(K.stress7) + " (7 T.)" : "Garmin Readiness " + nf(K.readiness), sp: "bb_wake" },
     { l: "Fitness (CTL)", v: nf(K.ctl), u: "", d: "Ermüdung (ATL) " + nf(K.atl), sp: "ctl" },
     { l: "Form (TSB)", v: signed(K.tsb), u: "", d: "ACWR " + nf(K.acwr, 2), sp: "tsb" },
-    { l: "VO2max", v: nf(K.vo2max, 1), u: "ml/kg/min", d: deltaSpan(K.vo2_change, 1, true, " in 8 Wochen"), sp: "vo2max" },
+    { l: "VO2max", v: nf(K.vo2max, 1), u: "ml/kg/min", d: deltaSpan(K.vo2_change, 1, true, " in 8 Wochen"), sp: "vo2max", hideEmpty: true },
     { l: "Schritte", v: nf(K.steps7), u: "Ø 7 T.", d: "Stress Ø " + nf(K.stress7), sp: "steps" },
     { l: "Intensitätsminuten", v: nf(K.im_week), u: "/ 7 T.", d: K.im_week >= 150 ? "WHO-Ziel erreicht" : "WHO-Ziel: 150", sp: null },
-    { l: "Trainingsstatus (Garmin)", v: K.training_status || "–", u: "", d: "", sp: null, small: true },
+    { l: "Trainingsstatus (Garmin)", v: K.training_status || "–", u: "", d: "", sp: null, small: true, hideEmpty: true },
   ];
   const box = document.getElementById("kpis");
   box.textContent = "";
   for (const t of tiles) {
+    if (t.hideEmpty && t.v === "–") continue;  // Datenquelle liefert diesen Wert nicht
     const val = el("div", { class: "val", style: t.small ? "font-size:20px" : "" }, t.v);
     if (t.u) val.append(el("small", {}, t.u));
     const d = el("div", { class: "delta" });
