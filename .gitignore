@@ -1,0 +1,8 @@
+# Persönliche Gesundheitsdaten und Zugangstokens niemals committen
+data/
+output/
+.garminconnect/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
