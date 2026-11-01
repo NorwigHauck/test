@@ -212,6 +212,55 @@ meisten Unit-Tests: Teil-Tage, fehlende Tage, Zeitzonenwechsel, Upsert mit
 3. **Soll das Essen auch in Garmin Connect auftauchen?** Offiziell geht das nicht (keine Ernährungs-API).
 4. **Stack:** passt TypeScript/Next.js, oder lieber z. B. Python (FastAPI)?
 
+## 9. Umsetzung: Artefakt „Kalorienkonto“ (01.11.2026)
+
+Die erste Version läuft als Artefakt auf claude.ai:
+https://claude.ai/artifact/YYzseUMsmzH3HMGy3BEVLZ (privat, nur für dich sichtbar)
+
+Quelltext: `app/kalorienkonto.html`. Abrufskript: `scripts/garmin-pull.mjs`.
+Tests für den Import: `node --test tests/garmin-import.test.mjs`.
+
+### Was drin ist
+- **Tag:** Kontoblatt *Ziel − gegessen = übrig*. Balken für den Verbrauch
+  (Grundumsatz bisher, Aktivkalorien, Hochrechnung bis Tagesende) und für das
+  Gegessene mit Zielmarke. Dazu Makros und Mahlzeiten (Frühstück, Mittag,
+  Abend, Snacks). Löschen lässt sich rückgängig machen.
+- **Eintragen:** Suche in rund 70 Lebensmitteln mit Richtwerten, eigene
+  Lebensmittel, „Zuletzt gegessen“, direkte kcal-Eingabe und
+  **„Claude schätzt“** aus Text oder Foto (Teller oder Nährwerttabelle).
+- **Garmin-Daten:** Import von JSON oder CSV. Erkannt werden Daily Summaries
+  der Health API, die Ausgabe von `garmin-pull.mjs`, der Garmin-Datenexport
+  (`UDSFile_….json`) und CSV mit `Datum;Grundumsatz;Aktiv`. Teil-Tage werden
+  hochgerechnet. Von mehreren Lieferungen für denselben Tag gewinnt die
+  vollständigste. Werte lassen sich auch von Hand eintragen.
+- **Woche:** Balkendiagramm gegessen gegen verbrannt mit Zielmarken, Ø-Bilanz,
+  Gesamtbilanz (Faustregel 7.700 kcal ≈ 1 kg) und Tabelle.
+- **Ziele:** dynamisches Ziel (Grundumsatz + Anteil der Aktivkalorien − Defizit,
+  mit Untergrenze) oder fester Wert, Makro-Verteilung und Profil für die
+  Grundumsatz-Schätzung nach Mifflin-St Jeor an Tagen ohne Garmin-Daten.
+- **Speicher:** privater Bereich pro Person im Artefakt
+  (`data/users/<id>/…`). Auch wer den Link bekommt, sieht deine Daten nicht.
+
+### Abweichungen vom Plan und warum
+| Plan | Umsetzung | Grund |
+|---|---|---|
+| Backend holt Garmin-Daten selbst ab | Import von Datei oder Einfügen, plus Abrufskript | Artefakte dürfen keine fremden Server aufrufen, und es gibt keinen Garmin-Connector für claude.ai |
+| Open Food Facts als Lebensmitteldatenbank | Eingebaute Richtwertliste, eigene Lebensmittel, Schätzung durch Claude | Gleicher Grund, keine Netzwerkzugriffe aus dem Artefakt |
+| Barcode-Scan | Foto der Nährwerttabelle, ausgewertet von Claude | Kamera ist im Artefakt nicht verfügbar |
+| PostgreSQL | Datenbank des Artefakts | Kein eigener Server nötig |
+
+Garmin-AGB 15.10 (KI-Verarbeitung): Claude bekommt nur Essensbeschreibungen
+und Fotos, keine Garmin-Daten. Die Seite zeigt die Quelle „Garmin“ an und weist
+darauf hin, dass sie kein Garmin-Produkt ist.
+
+### Nächste Schritte
+- [ ] Personal-Key anlegen und `garmin-pull.mjs` gegen die echte API prüfen
+      (Endpunkt, Parameter, Token-Ablauf)
+- [ ] Beispieldaten in der App entfernen und eigene Daten importieren
+- [ ] Gewichtsverlauf und adaptive Kalibrierung (Phase 2)
+- [ ] Falls der Import auf Dauer zu umständlich wird: kleiner Sync-Dienst mit
+      Personal-Key, der die Werte regelmäßig abholt
+
 ## Quellen
 
 - [DC Rainmaker: Garmin Revamps and Opens Up Connect Developer API Program](https://www.dcrainmaker.com/2026/10/garmin-connect-api-revamps-connect-developer.html)
